@@ -7,15 +7,13 @@
  */
 namespace S3StreamWrapper;
 
-use Aws\S3\Exception\NoSuchKeyException;
-use Aws\S3\S3Client;
-use Guzzle\Http\EntityBody;
-use Guzzle\Http\EntityBodyInterface;
-use Guzzle\Service\Resource\Model;
+use Aws\S3\Exception\S3Exception;
+use Aws\S3\S3MultiRegionClient;
+use GuzzleHttp\Psr7\Utils;
 
 class S3StreamWrapper
 {
-    private static $clientClass = "Aws\\S3\\S3Client";
+    private static $clientClass = "Aws\\S3\\S3MultiRegionClient";
 
     public $context;
 
@@ -23,7 +21,7 @@ class S3StreamWrapper
     const STAT_FILE = 0100777;
 
     /**
-     * @var S3Client
+     * @var S3MultiRegionClient
      */
     private $client;
 
@@ -43,7 +41,7 @@ class S3StreamWrapper
         stream_wrapper_unregister("s3");
     }
 
-    public static function setClientClass($class = "Aws\\S3\\S3Client")
+    public static function setClientClass($class = "Aws\\S3\\S3MultiRegionClient")
     {
         self::$clientClass = $class;
     }
@@ -254,8 +252,11 @@ class S3StreamWrapper
                 'Bucket' => $parsed['bucket'],
                 'Key' => $parsed['path'] . $this->getSeparator(),
             ));
-        } catch (NoSuchKeyException $e) {
-            return true;
+        } catch (S3Exception $e) {
+            if ($e->getAwsErrorCode() == 'NoSuchKey') {
+                return True;
+            }
+            throw $e;
         }
 
         if($result['ContentLength'] != 0) {
@@ -310,11 +311,11 @@ class S3StreamWrapper
     }
 
     /**
-     * @return bool
+     * @return void
      */
     public function stream_flush()
     {
-        if ($this->save === false || $this->dirty == false || $this->data === null) {
+        if ($this->save === false || !$this->dirty || $this->data === null) {
             return;
         }
 
@@ -452,7 +453,7 @@ class S3StreamWrapper
             $this->metadata = $response;
             $this->dirty = false;
         } else {
-            $this->data = EntityBody::factory("");
+            $this->data = Utils::streamFor(fopen('file.txt', 'r'));
         }
 
         return true;
@@ -589,20 +590,20 @@ class S3StreamWrapper
                 return $this->stat(self::STAT_DIR, 0, strtotime($response['LastModified']));
             }
             return $this->stat(self::STAT_FILE, (int)$response['ContentLength'], strtotime($response['LastModified']));
-        } catch (NoSuchKeyException $e) {
-            // File not found, might be a directory
-            $options = array(
-                'Bucket' => $parsed['bucket'],
-                'Prefix' => rtrim($parsed['path'], $this->getSeparator()) . $this->getSeparator(),
-                'MaxKeys' => 1,
-            );
+        } catch (S3Exception $e) {
+            if ($e->getAwsErrorCode() == 'NoSuchKey') {
+                $options = array(
+                    'Bucket' => $parsed['bucket'],
+                    'Prefix' => rtrim($parsed['path'], $this->getSeparator()) . $this->getSeparator(),
+                    'MaxKeys' => 1,
+                );
 
-            $result = $client->listObjects($options);
-            if (count($result['Contents']) + count($result['CommonPrefixes'])) {
-                return $this->stat(self::STAT_DIR, 0, time());
+                $result = $client->listObjects($options);
+                if (count($result['Contents']) + count($result['CommonPrefixes'])) {
+                    return $this->stat(self::STAT_DIR, 0, time());
+                }
             }
-
-            return false;
+            throw $e;
         }
     }
 
